@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent } from "react";
 import { BailianVoiceClone } from "./BailianVoiceClone";
 import type { FasterLivePortraitConfig } from "./SettingsPanel";
 import {
@@ -19,6 +19,7 @@ import type { VoiceCloneApplication } from "../lib/voiceCloneApply";
 import { EDGE_ZH_VOICES } from "../constants/edgeZhVoices";
 import type { TtsProviderExtended } from "../constants/ttsBailian";
 import { buildTTSPreviewPayload, requestTTSPreview } from "../lib/ttsPreview";
+import { formatDuoDialogScript, isDuoDialogAvatar, nextDuoDialogRole, type DuoDialogLine } from "../lib/duoDialog";
 
 export type VideoCreationAudioSource = "upload" | "tts_text" | "voice_clone";
 type VideoCreationMode = "spoken_video" | "reference_video";
@@ -297,6 +298,13 @@ export function VideoCreationWorkspace({
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [sourceAssetBusy, setSourceAssetBusy] = useState(false);
   const [text, setText] = useState("欢迎使用 OpenTalking 视频创作。请选择数字人形象和音色，生成一段离线口播视频。");
+  const [duoDialogLines, setDuoDialogLines] = useState<DuoDialogLine[]>(() => [
+    { id: "duo-line-1", role: "female", text: "\u5927\u5bb6\u597d\uff0c\u4eca\u5929\u6211\u4eec\u6765\u804a\u804a\u8fd9\u4e2a\u4ea7\u54c1\u7684\u6838\u5fc3\u4eae\u70b9\u3002" },
+    { id: "duo-line-2", role: "male", text: "\u6ca1\u9519\uff0c\u6211\u4f1a\u4ece\u4f7f\u7528\u573a\u666f\u548c\u6548\u679c\u4e24\u4e2a\u89d2\u5ea6\u8865\u5145\u8bf4\u660e\u3002" },
+  ]);
+  const [duoDialogMaleVoice, setDuoDialogMaleVoice] = useState("zh-CN-YunxiNeural");
+  const [duoDialogFemaleVoice, setDuoDialogFemaleVoice] = useState("zh-CN-XiaoxiaoNeural");
+  const [draggingDuoDialogLineId, setDraggingDuoDialogLineId] = useState<string | null>(null);
   const [title, setTitle] = useState("数字人口播视频");
   const [generating, setGenerating] = useState(false);
   const [result, setResult] = useState<ExportVideoItem | null>(null);
@@ -321,6 +329,17 @@ export function VideoCreationWorkspace({
       : qwenVoiceOptions.find((voice) => voice.id === qwenVoice)?.label ?? qwenVoice;
   const cloneVoiceCount = voiceCatalog.filter((item) => item.source === "clone").length;
   const isReferenceVideoMode = creationMode === "reference_video";
+  const showDuoDialogControls = !isReferenceVideoMode && audioSource === "tts_text" && isDuoDialogAvatar(selectedAvatar?.id);
+  const duoDialogScriptText = useMemo(() => formatDuoDialogScript(duoDialogLines), [duoDialogLines]);
+  const effectiveVideoCreationText = showDuoDialogControls ? duoDialogScriptText : text;
+  const duoDialogNextRole = nextDuoDialogRole(duoDialogLines);
+  const duoDialogVoiceOptions = useMemo<VoiceOpt[]>(() => {
+    if (ttsProvider === "edge") return EDGE_ZH_VOICES.map((voice) => ({ id: voice.id, label: voice.label }));
+    if (ttsProvider === "openai_compatible") return [];
+    return qwenVoiceOptions;
+  }, [qwenVoiceOptions, ttsProvider]);
+  const effectiveDuoDialogMaleVoice = duoDialogVoiceOptions.some((voice) => voice.id === duoDialogMaleVoice) ? duoDialogMaleVoice : duoDialogVoiceOptions[0]?.id ?? "";
+  const effectiveDuoDialogFemaleVoice = duoDialogVoiceOptions.some((voice) => voice.id === duoDialogFemaleVoice) ? duoDialogFemaleVoice : duoDialogVoiceOptions[0]?.id ?? "";
   const canPreviewTts = !isReferenceVideoMode && audioSource !== "upload";
   const showIndexTTSControls = !isReferenceVideoMode && audioSource !== "upload" && INDEXTTS_PROVIDER_SET.has(ttsProvider);
   const effectiveIndexTTSConfig = showIndexTTSControls ? buildIndexTTSQualityConfig(indexTTSRequestConfig(indexttsConfig)) : undefined;
@@ -472,8 +491,49 @@ export function VideoCreationWorkspace({
     setAudioSource("voice_clone");
   }, [onQwenModelChange, onQwenVoiceChange, onTtsProviderChange, onVoiceCloned]);
 
+  const addDuoDialogLine = useCallback(() => {
+    setDuoDialogLines((current) => {
+      const role = nextDuoDialogRole(current);
+      return [...current, { id: `duo-line-${Date.now()}-${current.length}`, role, text: "" }];
+    });
+  }, []);
+
+  const updateDuoDialogLineText = useCallback((lineId: string, value: string) => {
+    setDuoDialogLines((current) => current.map((line) => line.id === lineId ? { ...line, text: value } : line));
+  }, []);
+
+  const toggleDuoDialogLineRole = useCallback((lineId: string) => {
+    setDuoDialogLines((current) => current.map((line) => line.id === lineId ? { ...line, role: line.role === "female" ? "male" : "female" } : line));
+  }, []);
+
+  const removeDuoDialogLine = useCallback((lineId: string) => {
+    setDuoDialogLines((current) => current.filter((line) => line.id !== lineId));
+  }, []);
+
+  const handleDuoDialogDragStart = useCallback((event: DragEvent<HTMLDivElement>, lineId: string) => {
+    setDraggingDuoDialogLineId(lineId);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", lineId);
+  }, []);
+
+  const handleDuoDialogDrop = useCallback((event: DragEvent<HTMLDivElement>, targetLineId: string) => {
+    event.preventDefault();
+    const sourceLineId = draggingDuoDialogLineId ?? event.dataTransfer.getData("text/plain");
+    if (!sourceLineId || sourceLineId === targetLineId) return;
+    setDuoDialogLines((current) => {
+      const sourceIndex = current.findIndex((line) => line.id === sourceLineId);
+      const targetIndex = current.findIndex((line) => line.id === targetLineId);
+      if (sourceIndex < 0 || targetIndex < 0) return current;
+      const next = [...current];
+      const [moved] = next.splice(sourceIndex, 1);
+      next.splice(targetIndex, 0, moved);
+      return next;
+    });
+    setDraggingDuoDialogLineId(null);
+  }, [draggingDuoDialogLineId]);
+
   const handlePreviewTts = useCallback(async () => {
-    const previewText = text.trim();
+    const previewText = effectiveVideoCreationText.trim();
     if (!previewText) {
       onNotify?.("请输入要试听的口播文本。", "info");
       return;
@@ -516,7 +576,7 @@ export function VideoCreationWorkspace({
     } finally {
       setTtsPreviewing(false);
     }
-  }, [edgeVoice, effectiveIndexTTSConfig, indexttsConfig.emotion_mode, indexttsEmotionAudioFile, onNotify, qwenModel, qwenVoice, showIndexTTSControls, text, ttsProvider]);
+  }, [edgeVoice, effectiveIndexTTSConfig, effectiveVideoCreationText, indexttsConfig.emotion_mode, indexttsEmotionAudioFile, onNotify, qwenModel, qwenVoice, showIndexTTSControls, ttsProvider]);
 
   const handleGenerate = useCallback(async () => {
     if (!selectedAvatar) {
@@ -531,7 +591,7 @@ export function VideoCreationWorkspace({
       onNotify?.("请先上传音频文件。", "info");
       return;
     }
-    if (!isReferenceVideoMode && audioSource !== "upload" && !text.trim()) {
+    if (!isReferenceVideoMode && audioSource !== "upload" && !effectiveVideoCreationText.trim()) {
       onNotify?.("请输入要合成的口播文本。", "info");
       return;
     }
@@ -562,7 +622,7 @@ export function VideoCreationWorkspace({
         title,
         audioSource,
         audioFile,
-        text,
+        text: effectiveVideoCreationText,
         ttsProvider,
         ttsModel: ttsProvider === "edge" || ttsProvider === "openai_compatible" ? undefined : qwenModel,
         voice: ttsProvider === "edge" ? edgeVoice : ttsProvider === "openai_compatible" ? undefined : qwenVoice,
@@ -581,7 +641,7 @@ export function VideoCreationWorkspace({
     } finally {
       setGenerating(false);
     }
-  }, [audioFile, audioSource, compositionConfig, edgeVoice, effectiveIndexTTSConfig, effectiveModel, fasterliveportraitConfig, indexttsConfig.emotion_mode, indexttsEmotionAudioFile, isReferenceVideoMode, models, onExportCreated, onNotify, qwenModel, qwenVoice, referenceDurationSec, selectedAvatar, showIndexTTSControls, text, title, ttsProvider]);
+  }, [audioFile, audioSource, compositionConfig, edgeVoice, effectiveIndexTTSConfig, effectiveModel, effectiveVideoCreationText, fasterliveportraitConfig, indexttsConfig.emotion_mode, indexttsEmotionAudioFile, isReferenceVideoMode, models, onExportCreated, onNotify, qwenModel, qwenVoice, referenceDurationSec, selectedAvatar, showIndexTTSControls, title, ttsProvider]);
 
   return (
     <main className="flex min-h-0 flex-1 flex-col bg-slate-100 p-4">
@@ -808,6 +868,81 @@ export function VideoCreationWorkspace({
                 <input type="file" accept="audio/*,.webm,.mp3,.wav,.m4a,.aac,.flac,.ogg" className="mt-3 block w-full text-xs" onChange={(event) => setAudioFile(event.currentTarget.files?.[0] ?? null)} />
                 {audioFile ? <span className="mt-2 block text-xs font-medium text-cyan-700">已选择：{audioFile.name}</span> : null}
               </label>
+            ) : showDuoDialogControls ? (
+              <div className="mt-4 space-y-4 rounded-lg border border-cyan-200 bg-cyan-50/60 p-4">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold text-slate-900">{"\u53cc\u4eba\u5bf9\u8bdd\u8bbe\u7f6e"}</p>
+                    <p className="mt-1 text-xs text-slate-500">{"\u5f53\u524d\u7d20\u6750\u4e3a\u53cc\u4eba\u7d20\u6750\uff0c\u6309\u8f6e\u6b21\u7f16\u8f91\u5de6\u53f3\u89d2\u8272\u7684\u5bf9\u8bdd\u5185\u5bb9\u3002"}</p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    <button type="button" onClick={() => setDuoDialogLines([])} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-cyan-200 hover:text-cyan-700">
+                      {"\u6e05\u7a7a\u5bf9\u8bdd"}
+                    </button>
+                    <button type="button" onClick={addDuoDialogLine} className="rounded-lg bg-cyan-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-cyan-500">
+                      {"\u65b0\u589e\u4e00\u8f6e\uff1a"}{duoDialogNextRole === "female" ? "\u5973" : "\u7537"}
+                    </button>
+                  </div>
+                </div>
+                <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+                  <label className="block text-sm font-medium text-slate-700">
+                    TTS
+                    <select value={ttsProvider} onChange={(event) => onTtsProviderChange(event.target.value as TtsProviderExtended)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+                      {(["edge", "dashscope", "cosyvoice", "sambert", "local_cosyvoice", "indextts", "local_f5_tts", "xiaomi_mimo", "openai_compatible"] as TtsProviderExtended[]).map((item) => <option key={item} value={item}>{providerLabel(item)}</option>)}
+                    </select>
+                  </label>
+                  <label className="block text-sm font-medium text-slate-700">
+                    {"\u6a21\u578b"}
+                    <select disabled={ttsProvider === "edge" || ttsProvider === "openai_compatible"} value={ttsProvider === "edge" || ttsProvider === "openai_compatible" ? "" : qwenModel} onChange={(event) => onQwenModelChange(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm disabled:bg-slate-100">
+                      {qwenModelOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                    </select>
+                  </label>
+                  <label className="block text-sm font-medium text-slate-700">
+                    {"\u7537\u97f3\u8272"}
+                    {ttsProvider === "openai_compatible" ? (
+                      <input disabled value={"\u540e\u7aef .env \u9ed8\u8ba4\u97f3\u8272"} className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-500" />
+                    ) : (
+                      <select value={effectiveDuoDialogMaleVoice} onChange={(event) => setDuoDialogMaleVoice(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+                        {duoDialogVoiceOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                      </select>
+                    )}
+                  </label>
+                  <label className="block text-sm font-medium text-slate-700">
+                    {"\u5973\u97f3\u8272"}
+                    {ttsProvider === "openai_compatible" ? (
+                      <input disabled value={"\u540e\u7aef .env \u9ed8\u8ba4\u97f3\u8272"} className="mt-2 w-full rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-500" />
+                    ) : (
+                      <select value={effectiveDuoDialogFemaleVoice} onChange={(event) => setDuoDialogFemaleVoice(event.target.value)} className="mt-2 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+                        {duoDialogVoiceOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                      </select>
+                    )}
+                  </label>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-3 text-xs font-medium text-slate-500">
+                    <span>{"\u5bf9\u8bdd\u5217\u8868"}</span>
+                    <span>{duoDialogScriptText.trim().length}/{VIDEO_CREATION_SCRIPT_MAX_CHARS}</span>
+                  </div>
+                  {duoDialogLines.length ? (
+                    <div className="space-y-2">
+                      {duoDialogLines.map((line, index) => (
+                        <div key={line.id} draggable onDragStart={(event) => handleDuoDialogDragStart(event, line.id)} onDragEnd={() => setDraggingDuoDialogLineId(null)} onDragOver={(event) => event.preventDefault()} onDrop={(event) => handleDuoDialogDrop(event, line.id)} className={`grid gap-2 rounded-lg border bg-white p-2 sm:grid-cols-[2rem_4rem_minmax(0,1fr)_2.5rem] ${draggingDuoDialogLineId === line.id ? "border-cyan-300 opacity-70" : "border-slate-200"}`}>
+                          <div className="flex h-9 cursor-move items-center justify-center rounded-md border border-slate-200 bg-slate-50 text-sm font-semibold text-slate-400" title={"\u62d6\u62fd\u6392\u5e8f"}>{"\u2261"}</div>
+                          <button type="button" onClick={() => toggleDuoDialogLineRole(line.id)} className={`h-9 rounded-md border px-2 text-xs font-semibold transition ${line.role === "female" ? "border-rose-200 bg-rose-50 text-rose-700" : "border-sky-200 bg-sky-50 text-sky-700"}`}>
+                            {line.role === "female" ? "\u5973" : "\u7537"}
+                          </button>
+                          <textarea value={line.text} onChange={(event) => updateDuoDialogLineText(line.id, event.target.value)} rows={2} maxLength={300} placeholder={`\u7b2c ${index + 1} \u8f6e${line.role === "female" ? "\u5973" : "\u7537"}\u89d2\u8272\u53f0\u8bcd`} className="min-h-[3.5rem] w-full resize-none rounded-md border border-slate-200 bg-white px-3 py-2 text-sm leading-5 outline-none transition focus:border-cyan-300 focus:ring-2 focus:ring-cyan-100" />
+                          <button type="button" onClick={() => removeDuoDialogLine(line.id)} aria-label={"\u5220\u9664\u8be5\u8f6e\u5bf9\u8bdd"} title={"\u5220\u9664"} className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-white text-lg font-semibold leading-none text-slate-400 transition hover:border-rose-200 hover:bg-rose-50 hover:text-rose-600">
+                            {"\u00d7"}
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-slate-300 bg-white px-3 py-6 text-center text-sm font-medium text-slate-500">{"\u6682\u65e0\u5bf9\u8bdd\u8f6e\u6b21\uff0c\u70b9\u51fb\u65b0\u589e\u4e00\u8f6e\u5f00\u59cb\u7f16\u8f91\u3002"}</div>
+                  )}
+                </div>
+              </div>
             ) : !isReferenceVideoMode ? (
               <div className="mt-4 space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
                 <label className="block text-sm font-medium text-slate-700">
@@ -1036,7 +1171,7 @@ export function VideoCreationWorkspace({
                     <button
                       type="button"
                       onClick={() => void handlePreviewTts()}
-                      disabled={ttsPreviewing || !text.trim()}
+                      disabled={ttsPreviewing || !effectiveVideoCreationText.trim()}
                       className="rounded-lg border border-cyan-200 bg-cyan-50 px-3 py-1.5 text-xs font-semibold text-cyan-700 transition hover:bg-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {ttsPreviewing ? "试听中..." : "试听口播"}
